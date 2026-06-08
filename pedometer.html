@@ -1,0 +1,267 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Pedometer - عداد الخطوات</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@tabler/icons-webfont@2.44.0/tabler-icons.min.css">
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: system-ui, sans-serif; background: #f5f5f5; color: #111; min-height: 100vh; padding: 1.5rem 1rem; }
+  @media (prefers-color-scheme: dark) {
+    body { background: #1a1a1a; color: #f0f0f0; }
+    .card  { background: #2a2a2a; border-color: #333; }
+    .mcard { background: #222; }
+    button { color: #f0f0f0; border-color: #444; }
+    button:hover:not(:disabled) { background: #2a2a2a; }
+  }
+  .wrap { max-width: 480px; margin: 0 auto; }
+  .header { text-align: center; margin-bottom: 1.5rem; }
+  .header h1 { font-size: 22px; font-weight: 500; }
+  .header p  { font-size: 14px; color: #666; margin-top: 4px; }
+  .cards { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-bottom: 1.25rem; }
+  .mcard { background: #ebebeb; border-radius: 8px; padding: 0.85rem; text-align: center; }
+  .mcard .label { font-size: 12px; color: #666; margin-bottom: 4px; }
+  .mcard .value { font-size: 28px; font-weight: 500; }
+  .mcard .unit  { font-size: 12px; color: #888; }
+  .btn-row { display: flex; gap: 10px; justify-content: center; margin-bottom: 1rem; }
+  button { padding: 11px 28px; border-radius: 8px; border: 1px solid #ccc; background: transparent; font-size: 15px; cursor: pointer; }
+  button:disabled { opacity: 0.4; cursor: not-allowed; }
+  #btn-start { background: #1D9E75; color: #fff; border-color: #1D9E75; font-weight: 500; }
+  #btn-start:hover:not(:disabled) { background: #0F6E56; }
+  .status { text-align: center; font-size: 14px; color: #666; min-height: 22px; margin-bottom: 1rem; }
+  .status.ok   { color: #1D9E75; font-weight: 500; }
+  .status.warn { color: #BA7517; font-weight: 500; }
+  .card { background: #fff; border: 1px solid #e0e0e0; border-radius: 12px; padding: 1rem; margin-bottom: 1rem; }
+  .card .chart-title { font-size: 13px; color: #888; margin-bottom: 8px; }
+  canvas { width: 100%; display: block; border-radius: 4px; }
+  .info-row { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .info-card { background: #fff; border: 1px solid #e0e0e0; border-radius: 8px; padding: 0.75rem; font-size: 12px; color: #666; }
+  .info-card strong { display: block; font-size: 12px; font-weight: 600; color: #333; margin-bottom: 2px; }
+  @media (prefers-color-scheme: dark) {
+    .info-card { background: #2a2a2a; border-color: #333; color: #aaa; }
+    .info-card strong { color: #eee; }
+    .mcard .label, .mcard .unit { color: #aaa; }
+    .header p, .status, .card .chart-title { color: #aaa; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="header">
+    <h1><i class="ti ti-walk"></i> عداد الخطوات</h1>
+    <p>FIR Filter + Peak Detection — Lab 3 Algorithm</p>
+  </div>
+
+  <div class="cards">
+    <div class="mcard">
+      <div class="label">الخطوات</div>
+      <div class="value" id="steps">0</div>
+      <div class="unit">steps</div>
+    </div>
+    <div class="mcard">
+      <div class="label">الوقت</div>
+      <div class="value" id="timer">30</div>
+      <div class="unit">ثانية</div>
+    </div>
+    <div class="mcard">
+      <div class="label">تردد الخطوة</div>
+      <div class="value" id="freq">—</div>
+      <div class="unit">Hz</div>
+    </div>
+  </div>
+
+  <div class="btn-row">
+    <button id="btn-start"><i class="ti ti-player-play"></i> ابدأ</button>
+    <button id="btn-reset" disabled><i class="ti ti-refresh"></i> إعادة</button>
+  </div>
+
+  <div class="status" id="status">اضغط ابدأ وامشِ مع موبايلك</div>
+
+  <div class="card">
+    <div class="chart-title">إشارة التسارع (filtered) — النقاط الحمراء = خطوات</div>
+    <canvas id="cvs" height="130"></canvas>
+  </div>
+
+  <div class="info-row">
+    <div class="info-card">
+      <strong>Fs = 25 Hz</strong>
+      نفس decimation من Lab 2
+    </div>
+    <div class="info-card">
+      <strong>Cutoff = 3 Hz</strong>
+      يحذف الضوضاء فوق 3 Hz
+    </div>
+    <div class="info-card">
+      <strong>MinPeakDist = 8 samples</strong>
+      Fs/3 = 25/3 ≈ 8
+    </div>
+    <div class="info-card">
+      <strong>MinPeakHeight = 30% max</strong>
+      threshold ديناميكي
+    </div>
+  </div>
+</div>
+
+<script>
+const FS = 25, DURATION = 30, CUTOFF = 3, ORDER = 20;
+const MIN_DIST = Math.round(FS / 3);
+let running = false, buf = [], filtBuf = [], peaks = [], elapsed = 0;
+let timerID = null, simID = null, lastT = null;
+
+const cvs = document.getElementById('cvs');
+const ctx = cvs.getContext('2d');
+function resizeCvs() {
+  const dpr = window.devicePixelRatio || 1;
+  cvs.width  = cvs.offsetWidth * dpr;
+  cvs.height = 130 * dpr;
+  ctx.scale(dpr, dpr);
+}
+resizeCvs();
+const W = () => cvs.offsetWidth, H = 130;
+
+function sincLP(order, fc, fs) {
+  const h = new Float64Array(order + 1), M = order, wc = 2 * Math.PI * fc / fs;
+  for (let n = 0; n <= M; n++) {
+    const nn = n - M / 2;
+    h[n] = nn === 0 ? wc / Math.PI : Math.sin(wc * nn) / (Math.PI * nn);
+    h[n] *= 0.54 - 0.46 * Math.cos(2 * Math.PI * n / M);
+  }
+  const sum = h.reduce((a, b) => a + b, 0);
+  return h.map(v => v / sum);
+}
+const fir = sincLP(ORDER, CUTOFF, FS);
+
+function applyFIR(signal) {
+  const out = new Float64Array(signal.length);
+  for (let i = 0; i < signal.length; i++) {
+    let s = 0;
+    for (let k = 0; k < fir.length && i - k >= 0; k++) s += fir[k] * signal[i - k];
+    out[i] = s;
+  }
+  return out;
+}
+
+function findPeaks(sig) {
+  const maxVal = Math.max(...sig), minH = 0.30 * maxVal, pks = [];
+  for (let i = 1; i < sig.length - 1; i++) {
+    if (sig[i] > sig[i-1] && sig[i] > sig[i+1] && sig[i] >= minH) {
+      if (!pks.length || i - pks[pks.length-1] >= MIN_DIST) pks.push(i);
+    }
+  }
+  return pks;
+}
+
+function reprocess() {
+  if (buf.length < 5) return;
+  filtBuf = Array.from(applyFIR(new Float64Array(buf)));
+  peaks   = findPeaks(filtBuf);
+  document.getElementById('steps').textContent = peaks.length;
+  if (peaks.length > 1 && elapsed > 0)
+    document.getElementById('freq').textContent = (peaks.length / elapsed).toFixed(2);
+  drawChart();
+}
+
+function drawChart() {
+  const cw = W();
+  ctx.clearRect(0, 0, cw, H);
+  const data = filtBuf.length > 1 ? filtBuf : buf;
+  if (data.length < 2) return;
+  const mn = Math.min(...data), mx = Math.max(...data), rng = mx - mn || 1;
+  const sx = cw / (data.length - 1), sy = (H - 20) / rng, base = 10;
+  ctx.beginPath();
+  ctx.strokeStyle = '#1D9E75'; ctx.lineWidth = 2;
+  data.forEach((v, i) => {
+    const x = i * sx, y = base + (mx - v) * sy;
+    i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+  });
+  ctx.stroke();
+  peaks.forEach(pi => {
+    const x = pi * sx, y = base + (mx - data[pi]) * sy;
+    ctx.beginPath(); ctx.arc(x, y, 6, 0, 2 * Math.PI);
+    ctx.fillStyle = '#E24B4A'; ctx.fill();
+  });
+}
+
+function onSensor(e) {
+  const now = Date.now();
+  if (lastT && (now - lastT) < 1000/FS - 5) return;
+  lastT = now;
+  const g = e.accelerationIncludingGravity;
+  buf.push(Math.sqrt(g.x**2 + g.y**2 + g.z**2));
+  reprocess();
+}
+
+async function start() {
+  document.getElementById('btn-start').disabled = true;
+  document.getElementById('btn-reset').disabled = false;
+  buf = []; filtBuf = []; peaks = []; elapsed = 0; lastT = null;
+  document.getElementById('steps').textContent = '0';
+  document.getElementById('freq').textContent = '—';
+  document.getElementById('timer').textContent = '30';
+
+  let hasSensor = false;
+  if (typeof DeviceMotionEvent !== 'undefined') {
+    if (typeof DeviceMotionEvent.requestPermission === 'function') {
+      try {
+        const p = await DeviceMotionEvent.requestPermission();
+        if (p === 'granted') hasSensor = true;
+        else setStatus('تحتاج إذن الحساس — حاول مجدداً', 'warn');
+      } catch(e) { setStatus('خطأ في الإذن', 'warn'); }
+    } else { hasSensor = true; }
+  }
+
+  if (hasSensor) {
+    window.addEventListener('devicemotion', onSensor);
+    setStatus('جاري التسجيل... امشِ بشكل طبيعي!', 'ok');
+  } else {
+    setStatus('حساس غير متاح — تشغيل simulation...', 'warn');
+    let t = 0;
+    simID = setInterval(() => {
+      const mag = 9.8 + 2.5 * Math.sin(2 * Math.PI * 1.4 * t / FS) + 0.3 * (Math.random() - 0.5);
+      buf.push(mag); reprocess(); t++;
+    }, 1000 / FS);
+  }
+
+  running = true;
+  timerID = setInterval(() => {
+    elapsed++;
+    const rem = DURATION - elapsed;
+    document.getElementById('timer').textContent = rem;
+    if (rem <= 0) stop();
+  }, 1000);
+}
+
+function stop() {
+  running = false;
+  clearInterval(timerID); clearInterval(simID);
+  window.removeEventListener('devicemotion', onSensor);
+  reprocess();
+  setStatus(`انتهى! ${peaks.length} خطوة في 30 ثانية ✓`, 'ok');
+  document.getElementById('timer').textContent = '0';
+}
+
+function reset() {
+  clearInterval(timerID); clearInterval(simID);
+  window.removeEventListener('devicemotion', onSensor);
+  running = false; buf = []; filtBuf = []; peaks = []; elapsed = 0; lastT = null;
+  document.getElementById('steps').textContent = '0';
+  document.getElementById('freq').textContent = '—';
+  document.getElementById('timer').textContent = '30';
+  document.getElementById('btn-start').disabled = false;
+  document.getElementById('btn-reset').disabled = true;
+  setStatus('اضغط ابدأ وامشِ مع موبايلك');
+  ctx.clearRect(0, 0, W(), H);
+}
+
+function setStatus(msg, cls) {
+  const el = document.getElementById('status');
+  el.textContent = msg;
+  el.className = 'status' + (cls ? ' ' + cls : '');
+}
+
+document.getElementById('btn-start').onclick = start;
+document.getElementById('btn-reset').onclick = reset;
+</script>
+</body>
+</html>
